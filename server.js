@@ -260,6 +260,11 @@ app.delete("/api/calendar/events/:id", async (req, res) => {
 
 app.use(express.static('public'));
 
+// Serve index.html for root path
+app.get('/', (req, res) => {
+  res.sendFile(__dirname + '/public/index.html');
+});
+
 /* ========================================
    HEALTH CHECK
 ======================================== */
