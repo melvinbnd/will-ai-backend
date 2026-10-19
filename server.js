@@ -1,32 +1,43 @@
-require('dotenv').config();
-
 const express = require("express");
 const cors = require("cors");
 const { google } = require("googleapis");
 const fs = require("fs");
-const path = require("path");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-/* Servir les fichiers statiques (WILL.AI depuis public/) */
-app.use(express.static('public'));
 
 /* ========================================
    CONFIGURATION
 ======================================== */
 
 let GOOGLE_CREDENTIALS = null;
-try {
-  const configPath = path.join(__dirname, "config.json");
-  const configData = fs.readFileSync(configPath, "utf8");
-  GOOGLE_CREDENTIALS = JSON.parse(configData);
-} catch (err) {
-  console.error("Error reading config.json:", err.message);
+
+// Essayer d'abord depuis les variables d'environnement (Vercel)
+if (process.env.GOOGLE_CREDENTIALS) {
+  try {
+    GOOGLE_CREDENTIALS = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+    console.log("✓ Google credentials loaded from environment");
+  } catch (err) {
+    console.error("Error parsing GOOGLE_CREDENTIALS env var:", err.message);
+  }
 }
 
+// Si pas de variables d'environnement, essayer config.json (développement local)
+if (!GOOGLE_CREDENTIALS) {
+  try {
+    const configData = fs.readFileSync("./config.json", "utf8");
+    GOOGLE_CREDENTIALS = JSON.parse(configData);
+    console.log("✓ Google credentials loaded from config.json");
+  } catch (err) {
+    console.warn("⚠ No config.json found and no GOOGLE_CREDENTIALS env var");
+  }
+}
+
+// Sheet ID — extrait de l'URL
 const SHEET_ID = process.env.SHEET_ID || "11VvZeJyN9Spw5SbYTtDXozKerKOZW0gzT-qF7juFZOY";
+
+// Plage des tâches dans le Sheet
 const TASKS_RANGE = "WILLIAM!A2:F100";
 
 /* ========================================
@@ -53,6 +64,7 @@ if (GOOGLE_CREDENTIALS) {
    TASKS — CRUD
 ======================================== */
 
+// GET /api/tasks — récupère toutes les tâches
 app.get("/api/tasks", async (req, res) => {
   try {
     if (!sheets) return res.status(500).json({ error: "Google not configured" });
@@ -79,6 +91,7 @@ app.get("/api/tasks", async (req, res) => {
   }
 });
 
+// POST /api/tasks — ajoute une tâche
 app.post("/api/tasks", async (req, res) => {
   try {
     const { id, project, prio, title, meta, due } = req.body;
@@ -99,6 +112,7 @@ app.post("/api/tasks", async (req, res) => {
   }
 });
 
+// PUT /api/tasks/:id — met à jour une tâche
 app.put("/api/tasks/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -129,6 +143,7 @@ app.put("/api/tasks/:id", async (req, res) => {
   }
 });
 
+// DELETE /api/tasks/:id — supprime une tâche
 app.delete("/api/tasks/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -159,6 +174,93 @@ app.delete("/api/tasks/:id", async (req, res) => {
 });
 
 /* ========================================
+   CALENDAR — CRUD
+======================================== */
+
+// GET /api/calendar/events — récupère les événements du jour
+app.get("/api/calendar/events", async (req, res) => {
+  try {
+    if (!calendar) return res.status(500).json({ error: "Google not configured" });
+
+    const today = new Date();
+    const startOfDay = new Date(today);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(today);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const response = await calendar.events.list({
+      calendarId: "primary",
+      timeMin: startOfDay.toISOString(),
+      timeMax: endOfDay.toISOString(),
+      singleEvents: true,
+      orderBy: "startTime"
+    });
+
+    const events = (response.data.items || []).map(e => ({
+      id: e.id,
+      title: e.summary,
+      start: e.start?.dateTime || e.start?.date,
+      end: e.end?.dateTime || e.end?.date
+    }));
+
+    res.json(events);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/calendar/events — crée un événement
+app.post("/api/calendar/events", async (req, res) => {
+  try {
+    const { title, start, end, description } = req.body;
+    if (!calendar) return res.status(500).json({ error: "Google not configured" });
+
+    const event = {
+      summary: title,
+      description,
+      start: { dateTime: start },
+      end: { dateTime: end },
+      reminders: { useDefault: true }
+    };
+
+    const response = await calendar.events.insert({
+      calendarId: "primary",
+      resource: event
+    });
+
+    res.json({ success: true, eventId: response.data.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/calendar/events/:id — supprime un événement
+app.delete("/api/calendar/events/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!calendar) return res.status(500).json({ error: "Google not configured" });
+
+    await calendar.events.delete({
+      calendarId: "primary",
+      eventId: id
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ========================================
+   STATIC FILES — Serve WILL.AI frontend
+======================================== */
+
+app.use(express.static('public'));
+
+/* ========================================
    HEALTH CHECK
 ======================================== */
 
@@ -175,7 +277,7 @@ app.get("/api/health", (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Google configured: ${auth ? "yes" : "no"}`);
-  console.log(`Serving WILL.AI from public/ folder`);
+  console.log(`\n🚀 Server running on port ${PORT}`);
+  console.log(`Google configured: ${auth ? "✓ yes" : "✗ no"}`);
+  console.log(`Frontend: http://localhost:${PORT}\n`);
 });
