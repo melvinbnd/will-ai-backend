@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const { google } = require("googleapis");
 const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(cors());
@@ -13,31 +14,28 @@ app.use(express.json());
 
 let GOOGLE_CREDENTIALS = null;
 
-// Essayer d'abord depuis les variables d'environnement (Vercel)
+// 1) Vercel : variable d'environnement
 if (process.env.GOOGLE_CREDENTIALS) {
   try {
     GOOGLE_CREDENTIALS = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-    console.log("✓ Google credentials loaded from environment");
+    console.log("Google credentials: env");
   } catch (err) {
-    console.error("Error parsing GOOGLE_CREDENTIALS env var:", err.message);
+    console.error("Erreur parsing GOOGLE_CREDENTIALS:", err.message);
   }
 }
 
-// Si pas de variables d'environnement, essayer config.json (développement local)
+// 2) Local : config.json
 if (!GOOGLE_CREDENTIALS) {
   try {
-    const configData = fs.readFileSync("./config.json", "utf8");
-    GOOGLE_CREDENTIALS = JSON.parse(configData);
-    console.log("✓ Google credentials loaded from config.json");
+    const configPath = path.join(process.cwd(), "config.json");
+    GOOGLE_CREDENTIALS = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    console.log("Google credentials: config.json");
   } catch (err) {
-    console.warn("⚠ No config.json found and no GOOGLE_CREDENTIALS env var");
+    console.warn("Pas de credentials Google trouvees");
   }
 }
 
-// Sheet ID — extrait de l'URL
 const SHEET_ID = process.env.SHEET_ID || "11VvZeJyN9Spw5SbYTtDXozKerKOZW0gzT-qF7juFZOY";
-
-// Plage des tâches dans le Sheet
 const TASKS_RANGE = "WILLIAM!A2:F100";
 
 /* ========================================
@@ -61,10 +59,21 @@ if (GOOGLE_CREDENTIALS) {
 }
 
 /* ========================================
+   HEALTH CHECK
+======================================== */
+
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "ok",
+    google: auth ? "configured" : "not configured",
+    cwd: process.cwd()
+  });
+});
+
+/* ========================================
    TASKS — CRUD
 ======================================== */
 
-// GET /api/tasks — récupère toutes les tâches
 app.get("/api/tasks", async (req, res) => {
   try {
     if (!sheets) return res.status(500).json({ error: "Google not configured" });
@@ -75,7 +84,7 @@ app.get("/api/tasks", async (req, res) => {
     });
 
     const rows = response.data.values || [];
-    const tasks = rows.map((row, idx) => ({
+    const tasks = rows.map(row => ({
       id: row[0],
       project: row[1],
       prio: parseInt(row[2] || 1),
@@ -91,18 +100,16 @@ app.get("/api/tasks", async (req, res) => {
   }
 });
 
-// POST /api/tasks — ajoute une tâche
 app.post("/api/tasks", async (req, res) => {
   try {
     const { id, project, prio, title, meta, due } = req.body;
     if (!sheets) return res.status(500).json({ error: "Google not configured" });
 
-    const values = [[id, project, prio, title, meta, due]];
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: TASKS_RANGE,
       valueInputOption: "USER_ENTERED",
-      resource: { values }
+      resource: { values: [[id, project, prio, title, meta, due]] }
     });
 
     res.json({ success: true, task: { id, project, prio, title, meta, due } });
@@ -112,7 +119,6 @@ app.post("/api/tasks", async (req, res) => {
   }
 });
 
-// PUT /api/tasks/:id — met à jour une tâche
 app.put("/api/tasks/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -125,15 +131,13 @@ app.put("/api/tasks/:id", async (req, res) => {
     });
     const rows = response.data.values || [];
     const idx = rows.findIndex(r => r[0] === id);
-
     if (idx === -1) return res.status(404).json({ error: "Task not found" });
 
-    rows[idx] = [id, project, prio, title, meta, due];
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
       range: `WILLIAM!A${idx + 2}:F${idx + 2}`,
       valueInputOption: "USER_ENTERED",
-      resource: { values: [rows[idx]] }
+      resource: { values: [[id, project, prio, title, meta, due]] }
     });
 
     res.json({ success: true });
@@ -143,7 +147,6 @@ app.put("/api/tasks/:id", async (req, res) => {
   }
 });
 
-// DELETE /api/tasks/:id — supprime une tâche
 app.delete("/api/tasks/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -155,7 +158,6 @@ app.delete("/api/tasks/:id", async (req, res) => {
     });
     const rows = response.data.values || [];
     const idx = rows.findIndex(r => r[0] === id);
-
     if (idx === -1) return res.status(404).json({ error: "Task not found" });
 
     rows.splice(idx, 1);
@@ -177,15 +179,13 @@ app.delete("/api/tasks/:id", async (req, res) => {
    CALENDAR — CRUD
 ======================================== */
 
-// GET /api/calendar/events — récupère les événements du jour
 app.get("/api/calendar/events", async (req, res) => {
   try {
     if (!calendar) return res.status(500).json({ error: "Google not configured" });
 
-    const today = new Date();
-    const startOfDay = new Date(today);
+    const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(today);
+    const endOfDay = new Date();
     endOfDay.setHours(23, 59, 59, 999);
 
     const response = await calendar.events.list({
@@ -199,8 +199,8 @@ app.get("/api/calendar/events", async (req, res) => {
     const events = (response.data.items || []).map(e => ({
       id: e.id,
       title: e.summary,
-      start: e.start?.dateTime || e.start?.date,
-      end: e.end?.dateTime || e.end?.date
+      start: e.start && (e.start.dateTime || e.start.date),
+      end: e.end && (e.end.dateTime || e.end.date)
     }));
 
     res.json(events);
@@ -210,23 +210,20 @@ app.get("/api/calendar/events", async (req, res) => {
   }
 });
 
-// POST /api/calendar/events — crée un événement
 app.post("/api/calendar/events", async (req, res) => {
   try {
     const { title, start, end, description } = req.body;
     if (!calendar) return res.status(500).json({ error: "Google not configured" });
 
-    const event = {
-      summary: title,
-      description,
-      start: { dateTime: start },
-      end: { dateTime: end },
-      reminders: { useDefault: true }
-    };
-
     const response = await calendar.events.insert({
       calendarId: "primary",
-      resource: event
+      resource: {
+        summary: title,
+        description,
+        start: { dateTime: start },
+        end: { dateTime: end },
+        reminders: { useDefault: true }
+      }
     });
 
     res.json({ success: true, eventId: response.data.id });
@@ -236,17 +233,10 @@ app.post("/api/calendar/events", async (req, res) => {
   }
 });
 
-// DELETE /api/calendar/events/:id — supprime un événement
 app.delete("/api/calendar/events/:id", async (req, res) => {
   try {
-    const { id } = req.params;
     if (!calendar) return res.status(500).json({ error: "Google not configured" });
-
-    await calendar.events.delete({
-      calendarId: "primary",
-      eventId: id
-    });
-
+    await calendar.events.delete({ calendarId: "primary", eventId: req.params.id });
     res.json({ success: true });
   } catch (err) {
     console.error(err);
@@ -255,34 +245,34 @@ app.delete("/api/calendar/events/:id", async (req, res) => {
 });
 
 /* ========================================
-   STATIC FILES — Serve WILL.AI frontend
+   FRONTEND WILL.AI
 ======================================== */
 
-app.use(express.static('public'));
+const PUBLIC_DIR = path.join(process.cwd(), "public");
 
-// Serve index.html for root path
-app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/public/index.html');
+app.use(express.static(PUBLIC_DIR));
+
+app.get("/", (req, res) => {
+  const filePath = path.join(PUBLIC_DIR, "index.html");
+  try {
+    const html = fs.readFileSync(filePath, "utf8");
+    res.set("Content-Type", "text/html; charset=utf-8");
+    res.send(html);
+  } catch (err) {
+    console.error("index.html introuvable:", filePath, err.message);
+    res.status(500).send("index.html introuvable a " + filePath);
+  }
 });
 
 /* ========================================
-   HEALTH CHECK
-======================================== */
-
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    google: auth ? "configured" : "not configured"
-  });
-});
-
-/* ========================================
-   DÉMARRAGE
+   DEMARRAGE
 ======================================== */
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`\n🚀 Server running on port ${PORT}`);
-  console.log(`Google configured: ${auth ? "✓ yes" : "✗ no"}`);
-  console.log(`Frontend: http://localhost:${PORT}\n`);
+  console.log("Server on port " + PORT);
+  console.log("Google: " + (auth ? "ok" : "non configure"));
+  console.log("Public dir: " + PUBLIC_DIR);
 });
+
+module.exports = app;
